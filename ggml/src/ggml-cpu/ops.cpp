@@ -5483,6 +5483,7 @@ void ggml_compute_forward_clamp(
             {
                 ggml_compute_forward_clamp_f16(params, dst);
             } break;
+        case GGML_TYPE_QU16_0:
         case GGML_TYPE_BF16:
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q4_1:

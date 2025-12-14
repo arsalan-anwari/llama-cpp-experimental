@@ -495,7 +495,10 @@ void llama_model::load_hparams(llama_model_loader & ml) {
 
     // everything past this point is not vocab-related
     // for CLIP models, we only need to load tensors, no hparams
-    if (hparams.vocab_only || ml.get_arch() == LLM_ARCH_CLIP) {
+    if (hparams.vocab_only 
+        || ml.get_arch() == LLM_ARCH_CLIP 
+        || ml.get_arch() == LLM_ARCH_BITWISE_NN
+    ) {
         return;
     }
 
@@ -7738,6 +7741,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_ARWKV7:
         case LLM_ARCH_WAVTOKENIZER_DEC:
         case LLM_ARCH_NEMOTRON_H:
+        case LLM_ARCH_BITWISE_NN:
             return LLAMA_ROPE_TYPE_NONE;
 
         // use what we call a normal RoPE, operating on pairs of consecutive head values

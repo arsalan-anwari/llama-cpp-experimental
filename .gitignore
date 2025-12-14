@@ -136,3 +136,8 @@ poetry.toml
 /.windsurf/
 # emscripten
 a.out.*
+
+# Custom 
+bin/
+lib/
+include/

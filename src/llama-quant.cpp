@@ -182,6 +182,11 @@ static ggml_type llama_tensor_get_type(quantize_state_impl & qs, ggml_type new_t
     const llm_arch arch = qs.model.arch;
     const auto       tn = LLM_TN(arch);
 
+    // Custom minimal arch: keep the requested default type without any heuristics
+    if (arch == LLM_ARCH_BITWISE_NN) {
+        return new_type;
+    }
+
     auto use_more_bits = [](int i_layer, int n_layers) -> bool {
         return i_layer < n_layers/8 || i_layer >= 7*n_layers/8 || (i_layer - n_layers/8)%3 == 2;
     };
@@ -571,6 +576,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
         case LLAMA_FTYPE_MOSTLY_IQ4_XS:  default_type = GGML_TYPE_IQ4_XS;  break;
         case LLAMA_FTYPE_MOSTLY_IQ3_S:   default_type = GGML_TYPE_IQ3_S;   break;
         case LLAMA_FTYPE_MOSTLY_IQ3_M:   default_type = GGML_TYPE_IQ3_S;   break;
+        case LLAMA_FTYPE_MOSTLY_QU16_0:  default_type = GGML_TYPE_QU16_0;  break;
 
         default: throw std::runtime_error(format("invalid output file type %d\n", ftype));
     }
@@ -811,8 +817,11 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
                llama_format_tensor_shape(tensor).c_str(),
                ggml_type_name(tensor->type));
 
-        // This used to be a regex, but <regex> has an extreme cost to compile times.
-        bool quantize = name.rfind("weight") == name.size() - 6; // ends with 'weight'?
+        // For the minimal bitwise-nn arch we quantize all eligible tensors (no "weight" suffixes to key off).
+        bool quantize = model.arch == LLM_ARCH_BITWISE_NN
+                      ? ggml_n_dims(tensor) >= 2
+                      // This used to be a regex, but <regex> has an extreme cost to compile times.
+                      : name.rfind("weight") == name.size() - 6; // ends with 'weight'?
 
         // quantize only 2D and 3D tensors (experts)
         quantize &= (ggml_n_dims(tensor) >= 2);

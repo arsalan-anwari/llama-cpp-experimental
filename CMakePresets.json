@@ -8,7 +8,14 @@
         "binaryDir":   "${sourceDir}/build-${presetName}",
         "cacheVariables": {
             "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-            "CMAKE_INSTALL_RPATH": "$ORIGIN;$ORIGIN/.."
+            "GGML_VULKAN": "OFF",
+            "GGML_CCACHE": "OFF",
+            "LLAMA_BUILD_TOOLS": "ON",
+            "CMAKE_INSTALL_PREFIX": "${sourceDir}",
+            "CMAKE_INSTALL_BINDIR": "bin",
+            "CMAKE_INSTALL_LIBDIR": "lib",
+            "CMAKE_INSTALL_INCLUDEDIR": "include",
+            "CMAKE_INSTALL_RPATH": "$ORIGIN/../lib"
         }
     },
     {

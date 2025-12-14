@@ -208,14 +208,29 @@ static bool gguf_ex_read_1(const std::string & fname, bool check_data) {
             printf("%s: tensor[%d]: n_dims = %d, ne = (%d, %d, %d, %d), name = %s, data = %p\n",
                 __func__, i, ggml_n_dims(cur), int(cur->ne[0]), int(cur->ne[1]), int(cur->ne[2]), int(cur->ne[3]), cur->name, cur->data);
 
-            // print first 10 elements
+        // print first 10 elements
+        printf("%s data[:10] : ", name);
+        if (cur->type == GGML_TYPE_QU16_0) {
+            const int blk = ggml_blck_size(cur->type);             // number of elements in a block
+            const size_t type_size = ggml_type_size(cur->type);    // bytes per block
+            const size_t nb = ggml_nelements(cur) / blk;
+            int printed = 0;
+            for (size_t b = 0; b < nb && printed < 10; ++b) {
+                const char * base = (const char *) cur->data + b * type_size;
+                const ggml_fp16_t * hdr = (const ggml_fp16_t *) base;
+                const uint16_t * codes = (const uint16_t *) (base + 2 * sizeof(ggml_fp16_t));
+                const int n = MIN(blk, (int)(ggml_nelements(cur) - b * blk));
+                for (int j = 0; j < n && printed < 10; ++j, ++printed) {
+                    printf("%u ", (unsigned) codes[j]);
+                }
+            }
+        } else {
             const float * data = (const float *) cur->data;
-
-            printf("%s data[:10] : ", name);
             for (int j = 0; j < MIN(10, ggml_nelements(cur)); ++j) {
                 printf("%f ", data[j]);
             }
-            printf("\n\n");
+        }
+        printf("\n\n");
 
             // check data
             if (check_data) {

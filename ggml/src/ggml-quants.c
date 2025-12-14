@@ -257,6 +257,44 @@ void quantize_row_q8_1_ref(const float * GGML_RESTRICT x, block_q8_1 * GGML_REST
     }
 }
 
+void quantize_row_u16_ref(const float * GGML_RESTRICT x, block_u16 * GGML_RESTRICT y, int64_t k) {
+    // Per-block affine mapping: min -> 0, max -> 65535 (or 0 if flat)
+    const int nb = (int) ((k + QK_U16 - 1) / QK_U16);
+
+    for (int ib = 0; ib < nb; ++ib) {
+        const int64_t offset = (int64_t) ib * QK_U16;
+        const int64_t n = MIN(QK_U16, k - offset);
+
+        float xmin = x[offset];
+        float xmax = x[offset];
+        for (int i = 1; i < n; ++i) {
+            const float v = x[offset + i];
+            xmin = MIN(xmin, v);
+            xmax = MAX(xmax, v);
+        }
+
+        float d = xmax - xmin;
+        if (d == 0.0f) {
+            d = 1.0f; // avoid div-by-zero; all codes become 0
+        }
+        const float id = 65535.0f / d;
+
+        y[ib].d = GGML_FP32_TO_FP16(d / 65535.0f); // scale to multiply code back
+        y[ib].m = GGML_FP32_TO_FP16(xmin);
+
+        for (int i = 0; i < QK_U16; ++i) {
+            uint16_t q = 0;
+            if (i < n) {
+                const float v = x[offset + i];
+                const float u = (v - xmin) * id;
+                const float clamped = fminf(65535.0f, fmaxf(0.0f, u));
+                q = (uint16_t) llroundf(clamped);
+            }
+            y[ib].qs[i] = q;
+        }
+    }
+}
+
 static inline int best_index_mxfp4(float x, float e) {
     int best_index = 0;
     float best_err = fabsf(kvalues_mxfp4[0]*e - x);
@@ -410,6 +448,21 @@ void dequantize_row_q8_0(const block_q8_0 * GGML_RESTRICT x, float * GGML_RESTRI
 
         for (int j = 0; j < qk; ++j) {
             y[i*qk + j] = x[i].qs[j]*d;
+        }
+    }
+}
+
+void dequantize_row_u16(const block_u16 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    const int nb = (int) ((k + QK_U16 - 1) / QK_U16);
+
+    for (int ib = 0; ib < nb; ++ib) {
+        const float d = GGML_FP16_TO_FP32(x[ib].d);
+        const float m = GGML_FP16_TO_FP32(x[ib].m);
+        const int64_t offset = (int64_t) ib * QK_U16;
+        const int64_t n = MIN(QK_U16, k - offset);
+
+        for (int i = 0; i < n; ++i) {
+            y[offset + i] = m + d * (float) x[ib].qs[i];
         }
     }
 }
@@ -2096,6 +2149,18 @@ size_t quantize_mxfp4(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst,
     GGML_UNUSED(quant_weights);
     quantize_row_mxfp4_ref(src, dst, (int64_t)nrow*n_per_row);
     return nrow * ggml_row_size(GGML_TYPE_MXFP4, n_per_row);
+}
+
+size_t quantize_u16(const float * GGML_RESTRICT src, void * GGML_RESTRICT dst, int64_t nrow, int64_t n_per_row, const float * quant_weights) {
+    GGML_UNUSED(quant_weights);
+    const size_t row_size = ggml_row_size(GGML_TYPE_QU16_0, n_per_row);
+    char * out = (char *) dst;
+
+    for (int64_t row = 0; row < nrow; ++row) {
+        quantize_row_u16_ref(src + row * n_per_row, (block_u16 *)(out + row * row_size), n_per_row);
+    }
+
+    return nrow * row_size;
 }
 
 // ====================== Ternary (de)-quantization (BitNet b1.58 and TriLMs)
@@ -5312,6 +5377,7 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
         case GGML_TYPE_I16:
         case GGML_TYPE_I32:
         case GGML_TYPE_I64:
+        case GGML_TYPE_QU16_0:
             // nothing to validate
             break;
         default:

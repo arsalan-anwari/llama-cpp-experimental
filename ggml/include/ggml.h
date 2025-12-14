@@ -1,4 +1,6 @@
 #pragma once
+#ifndef GGML_INCLUDE_GGML_H
+#define GGML_INCLUDE_GGML_H
 
 //
 // GGML Tensor Library
@@ -421,8 +423,9 @@ extern "C" {
         // GGML_TYPE_IQ4_NL_4_4 = 36,
         // GGML_TYPE_IQ4_NL_4_8 = 37,
         // GGML_TYPE_IQ4_NL_8_8 = 38,
-        GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
-        GGML_TYPE_COUNT   = 40,
+        GGML_TYPE_MXFP4    = 39, // MXFP4 (1 block)
+        GGML_TYPE_QU16_0   = 40,
+        GGML_TYPE_COUNT    = 41,
     };
 
     // precision
@@ -458,6 +461,7 @@ extern "C" {
         GGML_FTYPE_MOSTLY_IQ1_M   = 23, // except 1d tensors
         GGML_FTYPE_MOSTLY_BF16    = 24, // except 1d tensors
         GGML_FTYPE_MOSTLY_MXFP4   = 25, // except 1d tensors
+        GGML_FTYPE_MOSTLY_QU16_0  = 39, // except 1d tensors
     };
 
     // available tensor operations:
@@ -2716,3 +2720,5 @@ extern "C" {
 #ifdef  __cplusplus
 }
 #endif
+
+#endif // GGML_INCLUDE_GGML_H

@@ -236,6 +236,14 @@ typedef struct {
 } block_q8_1;
 static_assert(sizeof(block_q8_1) == 2*sizeof(ggml_half) + QK8_1, "wrong q8_1 block size/padding");
 
+#define QK_U16 16
+typedef struct {
+    ggml_half d;        // scale (as fp16)
+    ggml_half m;        // min   (as fp16)
+    uint16_t  qs[QK_U16];
+} block_u16;
+static_assert(sizeof(block_u16) == 2*sizeof(ggml_half) + QK_U16*sizeof(uint16_t), "wrong u16 block size/padding");
+
 //
 // Ternary quantization
 //

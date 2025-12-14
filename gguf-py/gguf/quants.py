@@ -217,6 +217,37 @@ class BF16(__Quant, qtype=GGMLQuantizationType.BF16):
         return (blocks.view(np.int16).astype(np.int32) << 16).view(np.float32)
 
 
+class QU16_0(__Quant, qtype=GGMLQuantizationType.QU16_0):
+    @classmethod
+    def quantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:
+        # blocks shape: (n, 16)
+        n_blocks = blocks.shape[0]
+        out = np.empty((n_blocks, cls.type_size), dtype=np.uint8)
+        for i in range(n_blocks):
+            b = blocks[i]
+            xmin = b.min()
+            xmax = b.max()
+            d = xmax - xmin
+            if d == 0.0:
+                d = 1.0
+            scale = d / 65535.0
+            codes = np.rint((b - xmin) * (65535.0 / d)).clip(0, 65535).astype(np.uint16)
+
+            v = out[i].view(np.uint16)
+            v[0] = np.frombuffer(np.float16(scale).tobytes(), dtype=np.uint16)[0]
+            v[1] = np.frombuffer(np.float16(xmin).tobytes(), dtype=np.uint16)[0]
+            v[2:2 + codes.size] = codes
+        return out
+
+    @classmethod
+    def dequantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:
+        v = blocks.view(np.uint16).reshape((-1, 2 + 16))  # 2 header + 16 codes
+        scale = v[:, 0].view(np.float16).astype(np.float32)
+        xmin = v[:, 1].view(np.float16).astype(np.float32)
+        codes = v[:, 2:].astype(np.float32)
+        return xmin[:, None] + scale[:, None] * codes
+
+
 class Q4_0(__Quant, qtype=GGMLQuantizationType.Q4_0):
     @classmethod
     def quantize_blocks(cls, blocks: np.ndarray) -> np.ndarray:
