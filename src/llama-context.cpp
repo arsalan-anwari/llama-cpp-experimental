@@ -7,12 +7,137 @@
 #include "llama-memory.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
+#include "bitwise-nn.h"
+#include "ggml.h"
 
 #include <cinttypes>
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
 
+namespace {
+
+// Minimal QU16 block definition (kept local to avoid depending on ggml internal headers)
+static constexpr int QK_U16 = 16;
+struct block_u16 {
+    ggml_fp16_t d; // scale (fp16)
+    ggml_fp16_t m; // min (fp16)
+    uint16_t qs[QK_U16];
+};
+
+uint16_t bitwise_shift_u16(uint16_t v, int shift) {
+    if (shift <= 0) {
+        return v;
+    }
+    if (shift >= 16) {
+        return 0;
+    }
+    return (uint16_t) (v >> shift);
+}
+
+void bitwise_apply_shift(std::vector<uint16_t> & data, int shift) {
+    if (shift == 0) {
+        return;
+    }
+    for (auto & v : data) {
+        v = bitwise_shift_u16(v, shift);
+    }
+}
+
+std::vector<uint16_t> bitwise_tensor_codes(const ggml_tensor * t) {
+    const int64_t n = ggml_nelements(t);
+    std::vector<uint16_t> out(n, 0);
+
+    const size_t nbytes = ggml_nbytes(t);
+    std::vector<uint8_t> raw(nbytes);
+    ggml_backend_tensor_get(t, raw.data(), 0, nbytes);
+
+    switch (t->type) {
+        case GGML_TYPE_QU16_0:
+            {
+                const block_u16 * blocks = reinterpret_cast<const block_u16 *>(raw.data());
+                const int block = QK_U16;
+                int64_t idx = 0;
+                const int nb = (int) ((n + block - 1)/block);
+                for (int b = 0; b < nb && idx < n; ++b) {
+                    for (int i = 0; i < block && idx < n; ++i) {
+                        out[idx++] = blocks[b].qs[i];
+                    }
+                }
+            } break;
+        case GGML_TYPE_F16:
+            {
+                const ggml_fp16_t * vals = reinterpret_cast<const ggml_fp16_t *>(raw.data());
+                for (int64_t i = 0; i < n; ++i) {
+                    out[i] = (uint16_t) std::llround(ggml_fp16_to_fp32(vals[i]));
+                }
+            } break;
+        case GGML_TYPE_F32:
+            {
+                const float * vals = reinterpret_cast<const float *>(raw.data());
+                for (int64_t i = 0; i < n; ++i) {
+                    out[i] = (uint16_t) std::llround(vals[i]);
+                }
+            } break;
+        default:
+            {
+                const size_t count = std::min<size_t>(n, nbytes / sizeof(uint16_t));
+                const uint16_t * vals = reinterpret_cast<const uint16_t *>(raw.data());
+                std::copy(vals, vals + count, out.begin());
+            } break;
+    }
+
+    return out;
+}
+
+std::vector<llama_token> bitwise_generate_plan(
+        const std::vector<uint16_t> & C,
+        int64_t cols,
+        uint16_t H_l,
+        uint16_t H_r,
+        uint32_t byte_vocab_size) {
+    const auto & vocab_words = bitwise_demo_vocab_words();
+    const llama_token word_base = (llama_token) byte_vocab_size;
+
+    const size_t rows = cols > 0 ? C.size() / (size_t) cols : 0;
+    const int64_t safe_cols = cols > 0 ? cols : 1;
+    const size_t out_chars = std::min<size_t>(48, std::max<size_t>(8, C.size()));
+
+    uint32_t state = bitwise_mix32((uint32_t(H_l) << 16) ^ uint32_t(H_r) ^ 0x9e3779b9u);
+
+    std::vector<llama_token> plan;
+    plan.reserve(out_chars + 4);
+
+    for (size_t t = 0; t < out_chars; ) {
+        const uint8_t r = rows ? (uint8_t)((t + (state & 15u)) % rows) : 0;
+        const uint8_t c = (uint8_t)(((t >> 1) + ((state >> 8) & 15u)) % safe_cols);
+
+        const uint16_t logit = C.empty() ? 0 : C[r * safe_cols + c];
+        state = bitwise_mix32(state ^ (uint32_t(logit) * 2654435761u) ^ (uint32_t) t);
+
+        if ((state & 3u) != 0) {
+            plan.push_back(word_base + (state % vocab_words.size()));
+        } else {
+            const char ch = bitwise_to_printable(state ^ logit);
+            plan.push_back((llama_token) (uint8_t) ch);
+        }
+
+        ++t;
+        if ((state & 511u) == 0 && plan.size() > 40) {
+            break;
+        }
+    }
+
+    if (plan.empty()) {
+        plan.push_back(word_base);
+    }
+
+    return plan;
+}
+
+} // namespace
 //
 // llama_context
 //
@@ -972,8 +1097,142 @@ int llama_context::encode(const llama_batch & batch_inp) {
     return 0;
 }
 
+int llama_context::decode_bitwise(const llama_batch & batch_inp) {
+    GGML_ASSERT(batch_inp.token && "bitwise-nn expects token ids");
+
+    if (batch_inp.n_tokens == 0) {
+        return -1;
+    }
+
+    const auto now_us = ggml_time_us();
+
+    if (batch_inp.pos && batch_inp.pos[0] == 0) {
+        bitwise_history.clear();
+        bitwise_plan.clear();
+        bitwise_plan_pos = 0;
+    }
+
+    for (int32_t i = 0; i < batch_inp.n_tokens; ++i) {
+        bitwise_history.push_back(batch_inp.token[i]);
+    }
+
+    std::vector<int32_t> out_idxs;
+    if (batch_inp.logits) {
+        for (int32_t i = 0; i < batch_inp.n_tokens; ++i) {
+            if (batch_inp.logits[i]) {
+                out_idxs.push_back(i);
+            }
+        }
+    }
+    if (out_idxs.empty()) {
+        out_idxs.push_back(batch_inp.n_tokens - 1);
+    }
+
+    n_outputs = (uint32_t) out_idxs.size();
+    if (output_reserve(n_outputs) < n_outputs) {
+        return -2;
+    }
+    output_ids = out_idxs;
+
+    const bool need_new_plan = bitwise_plan_pos >= bitwise_plan.size() || batch_inp.n_tokens > 1;
+    if (need_new_plan) {
+        if (!model.bitwise_A || !model.bitwise_B) {
+            LLAMA_LOG_ERROR("%s: bitwise-nn tensors are missing\n", __func__);
+            return -1;
+        }
+
+        std::vector<uint8_t> I_tk;
+        I_tk.reserve(bitwise_history.size());
+        for (llama_token t : bitwise_history) {
+            I_tk.push_back((uint8_t) t);
+        }
+
+        uint8_t vmin = 0;
+        uint8_t vmax = 0;
+        if (!I_tk.empty()) {
+            vmin = I_tk[0];
+            vmax = I_tk[0];
+            for (uint8_t v : I_tk) {
+                vmin = std::min(vmin, v);
+                vmax = std::max(vmax, v);
+            }
+        } else {
+            vmax = 255;
+        }
+
+        const size_t left_len  = I_tk.size() / 2;
+        const size_t right_len = I_tk.size() - left_len;
+
+        std::vector<uint8_t> left(I_tk.begin(), I_tk.begin() + left_len);
+        std::vector<uint8_t> right(I_tk.begin() + left_len, I_tk.begin() + left_len + right_len);
+
+        const uint64_t hash_l = bitwise_fnv1a64(left);
+        const uint64_t hash_r = bitwise_fnv1a64(right);
+
+        const auto map_hash = [&](uint64_t h) {
+            if (vmax == vmin) {
+                return (uint16_t) vmin;
+            }
+            const uint16_t span = (uint16_t) (vmax - vmin);
+            return (uint16_t) (vmin + (h % (uint64_t) (span + 1)));
+        };
+
+        const uint16_t H_l = map_hash(hash_l);
+        const uint16_t H_r = map_hash(hash_r);
+
+        auto A = bitwise_tensor_codes(model.bitwise_A);
+        auto B = bitwise_tensor_codes(model.bitwise_B);
+
+        bitwise_apply_shift(A, model.bitwise_shiftA);
+        bitwise_apply_shift(B, model.bitwise_shiftB);
+
+        const size_t n_vals = std::min(A.size(), B.size());
+        A.resize(n_vals);
+        B.resize(n_vals);
+
+        std::vector<uint16_t> C(n_vals, 0);
+        for (size_t i = 0; i < n_vals; ++i) {
+            const uint16_t a = (uint16_t) (A[i] + H_l);
+            const uint16_t b = (uint16_t) (B[i] + H_r);
+            C[i] = (uint16_t) (~(a ^ b));
+        }
+
+        const int64_t cols = model.bitwise_C ? model.bitwise_C->ne[0] : model.bitwise_A->ne[0];
+        bitwise_plan = bitwise_generate_plan(C, cols, H_l, H_r, 256);
+        bitwise_plan_pos = 0;
+    }
+
+    const int64_t n_vocab = model.vocab.n_tokens();
+    for (uint32_t oi = 0; oi < n_outputs; ++oi) {
+        llama_token next = 0;
+        if (!bitwise_plan.empty()) {
+            next = bitwise_plan[std::min(bitwise_plan_pos, bitwise_plan.size() - 1)];
+            bitwise_plan_pos = std::min(bitwise_plan_pos + 1, bitwise_plan.size());
+        }
+
+        float * cur = logits + oi * n_vocab;
+        for (int64_t j = 0; j < n_vocab; ++j) {
+            cur[j] = -INFINITY;
+        }
+        cur[next] = 0.0f;
+    }
+
+    has_evaluated_once = true;
+    if (t_compute_start_us == 0) {
+        t_compute_start_us = now_us;
+    }
+    n_eval += batch_inp.n_tokens;
+    t_eval_us += ggml_time_us() - now_us;
+
+    return 0;
+}
+
 int llama_context::decode(const llama_batch & batch_inp) {
     GGML_ASSERT((!batch_inp.token && batch_inp.embd) || (batch_inp.token && !batch_inp.embd)); // NOLINT
+
+    if (model.arch == LLM_ARCH_BITWISE_NN) {
+        return decode_bitwise(batch_inp);
+    }
 
     if (!memory) {
         LLAMA_LOG_DEBUG("%s: cannot decode batches with this context (calling encode() instead)\n", __func__);

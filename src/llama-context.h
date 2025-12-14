@@ -182,6 +182,8 @@ struct llama_context {
             int64_t                          t_loop_start);
 
 private:
+    int decode_bitwise(const llama_batch & batch_inp);
+
     //
     // output
     //
@@ -264,6 +266,11 @@ private:
     };
 
     std::vector<swap_info> output_swaps;
+
+    // state for the toy bitwise-nn demo
+    std::vector<llama_token> bitwise_history;
+    std::vector<llama_token> bitwise_plan;
+    size_t bitwise_plan_pos = 0;
 
     ggml_backend_sched_ptr sched;
 

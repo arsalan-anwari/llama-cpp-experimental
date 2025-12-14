@@ -493,6 +493,10 @@ enum llm_tensor {
     LLM_TENSOR_NEXTN_HNORM,
     LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD,
     LLM_TENSOR_NEXTN_SHARED_HEAD_NORM,
+    // custom bitwise-nn tensors
+    LLM_TENSOR_BITWISE_A,
+    LLM_TENSOR_BITWISE_B,
+    LLM_TENSOR_BITWISE_C,
 };
 
 enum llm_tensor_layer {

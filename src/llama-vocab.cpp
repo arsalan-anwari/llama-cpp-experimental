@@ -4,6 +4,7 @@
 #include "gguf.h"
 #include "llama-impl.h"
 #include "llama-model-loader.h"
+#include "bitwise-nn.h"
 
 #include "unicode.h"
 
@@ -1605,6 +1606,8 @@ struct llama_vocab::impl {
 
     std::vector<char> precompiled_charsmap;
 
+    bool is_bitwise = false;
+
     impl(const llama_vocab & vocab) : vocab(vocab) {
     }
 
@@ -1681,6 +1684,61 @@ private:
 
 void llama_vocab::impl::load(llama_model_loader & ml, const LLM_KV & kv) {
     struct gguf_context * ctx = ml.meta.get();
+
+    if (ml.get_arch() == LLM_ARCH_BITWISE_NN) {
+        is_bitwise = true;
+        type = LLAMA_VOCAB_TYPE_NONE;
+        tokenizer_model = "bitwise-nn";
+        tokenizer_pre   = "byte";
+
+        special_bos_id  = LLAMA_TOKEN_NULL;
+        special_eos_id  = LLAMA_TOKEN_NULL;
+        special_unk_id  = LLAMA_TOKEN_NULL;
+        special_sep_id  = LLAMA_TOKEN_NULL;
+        special_pad_id  = LLAMA_TOKEN_NULL;
+        special_mask_id = LLAMA_TOKEN_NULL;
+        linefeed_id     = 10;
+
+        const size_t byte_tokens = 256;
+        const auto & words = bitwise_demo_vocab_words();
+        id_to_token.resize(byte_tokens + words.size());
+
+        auto register_token = [&](llama_token id, std::string text, llama_token_attr attr) {
+            token_data td;
+            td.text = std::move(text);
+            td.score = 0.0f;
+            td.attr = attr;
+            if (id >= (llama_token) id_to_token.size()) {
+                id_to_token.resize(id + 1);
+            }
+            id_to_token[id] = std::move(td);
+            token_to_id[id_to_token[id].text] = id;
+            max_token_len = std::max<int>(max_token_len, (int) id_to_token[id].text.size());
+        };
+
+        for (size_t i = 0; i < byte_tokens; ++i) {
+            std::string text;
+            if (i >= 32 && i <= 126) {
+                text.push_back((char) i);
+            } else {
+                text = ::format("<0x%02X>", (int) i);
+            }
+            register_token((llama_token) i, text, (llama_token_attr) (LLAMA_TOKEN_ATTR_BYTE | LLAMA_TOKEN_ATTR_NORMAL));
+        }
+
+        for (size_t i = 0; i < words.size(); ++i) {
+            register_token((llama_token) (byte_tokens + i), words[i], LLAMA_TOKEN_ATTR_NORMAL);
+        }
+
+        cache_special_tokens.clear();
+        cache_token_to_piece.resize(id_to_token.size());
+        for (size_t i = 0; i < id_to_token.size(); ++i) {
+            cache_token_to_piece[i] = id_to_token[i].text;
+        }
+
+        tokenizer = std::make_unique<llm_tokenizer>();
+        return;
+    }
 
     // determine vocab type
     {
@@ -2549,31 +2607,49 @@ std::string llama_vocab::impl::type_name() const{
 }
 
 bool llama_vocab::impl::is_normal(llama_token id) const {
+    if (type == LLAMA_VOCAB_TYPE_NONE && is_bitwise) {
+        return id_to_token[id].attr & LLAMA_TOKEN_ATTR_NORMAL;
+    }
     GGML_ASSERT(type != LLAMA_VOCAB_TYPE_NONE);
     return id_to_token[id].attr & LLAMA_TOKEN_ATTR_NORMAL;
 }
 
 bool llama_vocab::impl::is_unknown(llama_token id) const {
+    if (type == LLAMA_VOCAB_TYPE_NONE && is_bitwise) {
+        return id_to_token[id].attr & LLAMA_TOKEN_ATTR_UNKNOWN;
+    }
     GGML_ASSERT(type != LLAMA_VOCAB_TYPE_NONE);
     return id_to_token[id].attr & LLAMA_TOKEN_ATTR_UNKNOWN;
 }
 
 bool llama_vocab::impl::is_control(llama_token id) const {
+    if (type == LLAMA_VOCAB_TYPE_NONE && is_bitwise) {
+        return id_to_token[id].attr & LLAMA_TOKEN_ATTR_CONTROL;
+    }
     GGML_ASSERT(type != LLAMA_VOCAB_TYPE_NONE);
     return id_to_token[id].attr & LLAMA_TOKEN_ATTR_CONTROL;
 }
 
 bool llama_vocab::impl::is_byte(llama_token id) const {
+    if (type == LLAMA_VOCAB_TYPE_NONE && is_bitwise) {
+        return id_to_token[id].attr & LLAMA_TOKEN_ATTR_BYTE;
+    }
     GGML_ASSERT(type != LLAMA_VOCAB_TYPE_NONE);
     return id_to_token[id].attr & LLAMA_TOKEN_ATTR_BYTE;
 }
 
 bool llama_vocab::impl::is_user_defined(llama_token id) const {
+    if (type == LLAMA_VOCAB_TYPE_NONE && is_bitwise) {
+        return id_to_token[id].attr & LLAMA_TOKEN_ATTR_USER_DEFINED;
+    }
     GGML_ASSERT(type != LLAMA_VOCAB_TYPE_NONE);
     return id_to_token[id].attr & LLAMA_TOKEN_ATTR_USER_DEFINED;
 }
 
 bool llama_vocab::impl::is_unused(llama_token id) const {
+    if (type == LLAMA_VOCAB_TYPE_NONE && is_bitwise) {
+        return id_to_token[id].attr & LLAMA_TOKEN_ATTR_UNUSED;
+    }
     GGML_ASSERT(type != LLAMA_VOCAB_TYPE_NONE);
     return id_to_token[id].attr & LLAMA_TOKEN_ATTR_UNUSED;
 }
@@ -2583,6 +2659,9 @@ bool llama_vocab::impl::is_eog(llama_token id) const {
 }
 
 uint8_t llama_vocab::impl::token_to_byte(llama_token id) const {
+    if (get_type() == LLAMA_VOCAB_TYPE_NONE && is_bitwise) {
+        return (uint8_t) id;
+    }
     GGML_ASSERT(get_type() != LLAMA_VOCAB_TYPE_NONE);
     GGML_ASSERT(is_byte(id));
     const auto & token_data = id_to_token.at(id);
@@ -2604,6 +2683,9 @@ uint8_t llama_vocab::impl::token_to_byte(llama_token id) const {
 }
 
 llama_token_attr llama_vocab::impl::token_get_attr(llama_token id) const {
+    if (type == LLAMA_VOCAB_TYPE_NONE && is_bitwise) {
+        return id_to_token.at(id).attr;
+    }
     GGML_ASSERT(type != LLAMA_VOCAB_TYPE_NONE);
     return id_to_token.at(id).attr;
 }
@@ -2630,6 +2712,12 @@ void llama_vocab::impl::init_tokenizer(enum llama_vocab_type type) {
         case LLAMA_VOCAB_TYPE_PLAMO2:
             tokenizer = std::make_unique<llm_tokenizer_plamo2>(vocab);
             break;
+        case LLAMA_VOCAB_TYPE_NONE:
+            if (is_bitwise) {
+                tokenizer = std::make_unique<llm_tokenizer>();
+                break;
+            }
+            [[fallthrough]];
         default:
             GGML_ABORT("unsupported vocab type");
     }
@@ -2990,7 +3078,19 @@ std::vector<llama_token> llama_vocab::impl::tokenize(
                 }
             } break;
         case LLAMA_VOCAB_TYPE_NONE:
-            GGML_ABORT("fatal error");
+            {
+                // byte-level tokenize: one token per byte of raw text
+                for (const auto & fragment : fragment_buffer) {
+                    if (fragment.type == FRAGMENT_BUFFER_VARIANT_TYPE_RAW_TEXT) {
+                        const std::string text = fragment.raw_text.substr(fragment.offset, fragment.length);
+                        for (unsigned char ch : text) {
+                            output.push_back((llama_token) ch);
+                        }
+                    } else {
+                        output.push_back(fragment.token);
+                    }
+                }
+            } break;
     }
 
     return output;
@@ -3095,6 +3195,12 @@ int32_t llama_vocab::impl::token_to_piece(llama_token token, char * buf, int32_t
                 std::string result = token_text;
                 return _try_copy(result.data(), result.size());
             }
+            case LLAMA_VOCAB_TYPE_NONE: {
+                if (is_bitwise) {
+                    return _try_copy(token_text.data(), token_text.size());
+                }
+                GGML_ABORT("fatal error");
+            }
             default:
                 GGML_ABORT("fatal error");
         }
@@ -3114,8 +3220,18 @@ int32_t llama_vocab::impl::detokenize(
                          int32_t   text_len_max,
                             bool   remove_special,
                             bool   unparse_special) const {
-    if (type == LLAMA_VOCAB_TYPE_NONE) {
-        return 0;
+    if (type == LLAMA_VOCAB_TYPE_NONE && is_bitwise) {
+        std::string out;
+        out.reserve(n_tokens * 2);
+        for (int32_t i = 0; i < n_tokens; ++i) {
+            out += id_to_token.at(tokens[i]).text;
+        }
+        const int32_t n_needed = (int32_t) out.size();
+        if (text_len_max < n_needed) {
+            return -n_needed;
+        }
+        memcpy(text, out.data(), out.size());
+        return n_needed;
     }
 
     GGML_ASSERT(tokenizer && "Tokenizer not initialized. Call llama_vocab::init_tokenizer() first.");

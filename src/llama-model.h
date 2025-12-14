@@ -437,6 +437,13 @@ struct llama_model {
     struct ggml_tensor * output_b        = nullptr;
     struct ggml_tensor * output_norm_enc = nullptr;
 
+    // custom bitwise-nn tensors
+    struct ggml_tensor * bitwise_A = nullptr;
+    struct ggml_tensor * bitwise_B = nullptr;
+    struct ggml_tensor * bitwise_C = nullptr;
+    int32_t bitwise_shiftA = 0;
+    int32_t bitwise_shiftB = 0;
+
     // classifier
     struct ggml_tensor * cls       = nullptr;
     struct ggml_tensor * cls_b     = nullptr;

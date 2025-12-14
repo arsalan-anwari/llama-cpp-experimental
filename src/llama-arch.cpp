@@ -2544,6 +2544,9 @@ static const std::map<llm_arch, std::map<llm_tensor, const char *>> LLM_TENSOR_N
     {
         LLM_ARCH_BITWISE_NN,
         {
+            { LLM_TENSOR_BITWISE_A,        "A" },
+            { LLM_TENSOR_BITWISE_B,        "B" },
+            { LLM_TENSOR_BITWISE_C,        "C" },
         },
     },
     {
@@ -2748,6 +2751,10 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
     {LLM_TENSOR_NEXTN_HNORM,                {LLM_TENSOR_LAYER_OUTPUT, GGML_OP_MUL}},
     {LLM_TENSOR_NEXTN_SHARED_HEAD_HEAD,     {LLM_TENSOR_LAYER_OUTPUT, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_NEXTN_SHARED_HEAD_NORM,     {LLM_TENSOR_LAYER_OUTPUT, GGML_OP_MUL}},
+    // bitwise-nn
+    {LLM_TENSOR_BITWISE_A,                  {LLM_TENSOR_LAYER_INPUT, GGML_OP_NONE}},
+    {LLM_TENSOR_BITWISE_B,                  {LLM_TENSOR_LAYER_INPUT, GGML_OP_NONE}},
+    {LLM_TENSOR_BITWISE_C,                  {LLM_TENSOR_LAYER_INPUT, GGML_OP_NONE}},
 };
 
 LLM_KV::LLM_KV(llm_arch arch, const char * suffix) : arch(arch), suffix(suffix) {}

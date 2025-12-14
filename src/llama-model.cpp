@@ -13,6 +13,7 @@
 #include "ggml-cpp.h"
 
 #include "models/models.h"
+#include "bitwise-nn.h"
 
 #include <algorithm>
 #include <cassert>
@@ -495,9 +496,33 @@ void llama_model::load_hparams(llama_model_loader & ml) {
 
     // everything past this point is not vocab-related
     // for CLIP models, we only need to load tensors, no hparams
+    if (ml.get_arch() == LLM_ARCH_BITWISE_NN) {
+        // minimal defaults to keep the runtime happy
+        hparams.vocab_only          = false;
+        hparams.n_ctx_train         = 512;
+        hparams.n_ctx_orig_yarn     = hparams.n_ctx_train;
+        hparams.n_embd              = 16;
+        hparams.n_layer             = 0;
+        hparams.n_rot               = 0;
+        hparams.n_embd_head_k       = 16;
+        hparams.n_embd_head_v       = 16;
+        hparams.n_head_arr.fill(1);
+        hparams.n_head_kv_arr.fill(1);
+        hparams.n_ff_arr.fill(0);
+        hparams.causal_attn         = true;
+        hparams.f_norm_eps          = 1e-5f;
+        hparams.f_norm_rms_eps      = 1e-5f;
+        hparams.rope_freq_base_train  = 1.0f;
+        hparams.rope_freq_scale_train = 1.0f;
+        hparams.rope_scaling_type_train = LLAMA_ROPE_SCALING_TYPE_NONE;
+        // vocab size is handled by the vocab loader; we keep defaults minimal here
+
+        ml.get_key("demo.shiftA", bitwise_shiftA, false);
+        ml.get_key("demo.shiftB", bitwise_shiftB, false);
+        return;
+    }
     if (hparams.vocab_only 
-        || ml.get_arch() == LLM_ARCH_CLIP 
-        || ml.get_arch() == LLM_ARCH_BITWISE_NN
+        || ml.get_arch() == LLM_ARCH_CLIP
     ) {
         return;
     }
@@ -6579,6 +6604,28 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         layer.ffn_down_shexp     = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP,     "weight", i), { hparams.n_ff_shexp, n_embd }, 0);
                     }
                 } break;
+            case LLM_ARCH_BITWISE_NN:
+                {
+                    LLAMA_LOG_INFO("%s: loading bitwise-nn tensors\n", __func__);
+                    const auto * a_meta = ml.require_tensor_meta(tn(LLM_TENSOR_BITWISE_A, nullptr).str());
+                    const auto * b_meta = ml.require_tensor_meta(tn(LLM_TENSOR_BITWISE_B, nullptr).str());
+                    const auto * c_meta = ml.require_tensor_meta(tn(LLM_TENSOR_BITWISE_C, nullptr).str());
+
+                    if (a_meta->ne[2] > 1 || a_meta->ne[3] > 1 ||
+                        b_meta->ne[2] > 1 || b_meta->ne[3] > 1 ||
+                        c_meta->ne[2] > 1 || c_meta->ne[3] > 1) {
+                        GGML_ABORT("bitwise-nn tensors are expected to be at most 2D");
+                    }
+
+                    bitwise_A = create_tensor(tn(LLM_TENSOR_BITWISE_A, nullptr), {a_meta->ne[0], a_meta->ne[1] ? a_meta->ne[1] : 1}, 0);
+                    bitwise_B = create_tensor(tn(LLM_TENSOR_BITWISE_B, nullptr), {b_meta->ne[0], b_meta->ne[1] ? b_meta->ne[1] : 1}, 0);
+                    bitwise_C = create_tensor(tn(LLM_TENSOR_BITWISE_C, nullptr), {c_meta->ne[0], c_meta->ne[1] ? c_meta->ne[1] : 1}, 0);
+                    LLAMA_LOG_INFO("%s: bitwise-nn tensors A(%ld,%ld) B(%ld,%ld) C(%ld,%ld)\n",
+                        __func__,
+                        a_meta->ne[0], a_meta->ne[1],
+                        b_meta->ne[0], b_meta->ne[1],
+                        c_meta->ne[0], c_meta->ne[1]);
+                } break;
             default:
                 throw std::runtime_error("unknown architecture");
         }
@@ -7425,6 +7472,10 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
         case LLM_ARCH_GLM4_MOE:
             {
                 llm = std::make_unique<llm_build_glm4_moe>(*this, params);
+            } break;
+        case LLM_ARCH_BITWISE_NN:
+            {
+                GGML_ABORT("bitwise-nn uses a custom decode path and does not build ggml graphs");
             } break;
         case LLM_ARCH_BITNET:
             {
