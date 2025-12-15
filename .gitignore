@@ -65,12 +65,11 @@
 !/.github/workflows/*.yml
 
 # Models
-
-/models/*
 /models-mnt
 !/models/.editorconfig
 !/models/ggml-vocab-*.gguf*
 !/models/templates
+!/models/custom/*.gguf*
 
 # Zig
 /zig-out/
